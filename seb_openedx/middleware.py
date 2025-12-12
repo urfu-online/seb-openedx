@@ -339,6 +339,24 @@ class SecureExamBrowserMiddleware:
             ]
         ):
             return True
+        mfe_navigation_patterns = [
+            r"handler/goto_position$",  # Навигация Next/Previous
+            r"handler/get_completion$",  # Проверка завершения
+            r"handler/publish_completion$",  # Отметка о завершении
+        ]
+
+        for pattern in mfe_navigation_patterns:
+            if re.search(pattern, request.path):
+                # Проверяем, не заблокирована ли последовательность
+                usage_id = request.resolver_match.kwargs.get("usage_id")
+                if usage_id and "type@sequential" in usage_id:
+                    blacklist = config.get("BLACKLIST_SEQUENCES", [])
+                    block_match = re.search(r"block@([^/?]+)", usage_id)
+                    if block_match and block_match.group(1) in blacklist:
+                        continue  # Не добавляем в whitelist
+
+                LOG.warning(f"✅ Whitelisted MFE navigation: {request.path}")
+                return True
 
         if not whitelist_paths:
             return False

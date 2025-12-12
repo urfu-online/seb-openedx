@@ -88,7 +88,7 @@ class CheckSEBHash:
 
         if js_provided_url:
             # Режим JS API: Хешируем URL страницы, который нам прислал фронтенд
-            url_to_hash = js_provided_url
+            url_to_hash = urllib.parse.urlparse(js_provided_url).path
             LOG.warning(f"[SEB Check] Using JS Provided URL: {url_to_hash}")
         else:
             # Режим Native: Хешируем текущий URL API запроса
