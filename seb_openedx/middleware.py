@@ -50,9 +50,9 @@ class SecureExamBrowserMiddleware:
 
         if settings.SERVICE_VARIANT == "cms":
             return None
-        LOG.warning(f"🚀 Processing: {request.path}")
-        LOG.warning(f"📦 view_kwargs: {view_kwargs}")
-        LOG.warning(f"🎬 view_func: {view_func.__name__}")
+        # LOG.warning(f"🚀 Processing: {request.path}")
+        # LOG.warning(f"📦 view_kwargs: {view_kwargs}")
+        # LOG.warning(f"🎬 view_func: {view_func.__name__}")
         course_key_string = view_kwargs.get("course_key_string") or view_kwargs.get(
             "course_id"
         )
@@ -189,7 +189,7 @@ class SecureExamBrowserMiddleware:
 
             # Извлекаем usage_key для создания seb:// ссылки
             try:
-                usage_key_string = request.resolver_match.kwargs.get("usage_key_string")
+                usage_key_string = request.resolver_match.kwargs.get("usage_id")
                 if usage_key_string:
                     url = reverse(
                         "jump_to",
@@ -427,17 +427,13 @@ class SecureExamBrowserMiddleware:
         LOG.warning(f"📋 Blacklist: {blacklist_sequences}")
 
         # 1. Sequence API
-        # sequence_match = re.match(
-        #     r"^/api/courseware/sequence/(?P<usage_key>[^/?]+)", request.path
-        # )
-        # if sequence_match:
-        #     usage_key_string = sequence_match.group("usage_key")
+        # m = re.match(r"^/api/courseware/sequence/(?P<usage_key>[^/?]+)", request.path)
+        # if m:
+        #     usage_key_string = urllib.parse.unquote(m.group("usage_key"))
         #     block_id_match = re.search(r"block@([^/?]+)", usage_key_string)
-        #     if block_id_match:
-        #         block_id = block_id_match.group(1)
-        #         if block_id in blacklist_sequences:
-        #             LOG.warning(f"❌ BLOCKED Sequence API: {block_id}")
-        #             return True
+        #     if block_id_match and block_id_match.group(1) in blacklist_sequences:
+        #         LOG.warning("❌ BLOCKED Sequence API: %s", block_id_match.group(1))
+        #         return True
 
         # 2. Proctoring attempt API
         # if re.match(r"^/api/edx_proctoring/v1/proctored_exam/attempt/", request.path):

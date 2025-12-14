@@ -5,6 +5,7 @@ from __future__ import absolute_import
 import abc
 import hashlib
 import logging
+import urllib.parse
 
 from django.conf import settings
 
@@ -17,7 +18,7 @@ LOG = logging.getLogger(__name__)
 
 
 class Permission(metaclass=abc.ABCMeta):
-    """Abstract class Permision"""
+    """Abstract class Permission"""
 
     @abc.abstractmethod
     def check(self, request, course_key, masquerade=None):
@@ -47,7 +48,6 @@ class CheckSEBHash:
     def get_seb_keys(self, course_key):
         """
         Find the seb keys both in the detailed and the compact format
-        ... (оставляем старый код этого метода без изменений) ...
         """
         all_keys = []
         for source_function in get_ordered_seb_keys_sources():
@@ -63,57 +63,96 @@ class CheckSEBHash:
 
     def check(self, request, course_key, *args, **kwargs):
         """
-        Perform the check
-        1. Get the keys
-        2. Determine the URL to hash (Native API URL or JS Frontend URL)
-        3. Compare calculated hash with the header value
+        Проверка SEB с поддержкой JS API и Iframes через сессию.
         """
-        seb_keys = self.get_seb_keys(course_key)
-
-        # Если ключей для курса нет - доступ разрешен
-        if not seb_keys:
-            return True
-
-        # 1. Получаем хеш, который прислал клиент (Браузер или JS)
-        header_hash_value = request.META.get(self.http_header, None)
-
-        if not header_hash_value:
-            # Нет заголовка с хешем - сразу отказ
-            return False
-
-        # 2. Определяем, какой URL использовать для проверки
-        # Django преобразует дефисы в подчеркивания и добавляет HTTP_:
-        # X-SafeExamBrowser-RequestUrl -> HTTP_X_SAFEEXAMBROWSER_REQUESTURL
-        js_provided_url = request.META.get("HTTP_X_SAFEEXAMBROWSER_REQUESTURL", None)
-
-        if js_provided_url:
-            # Режим JS API: Хешируем URL страницы, который нам прислал фронтенд
-            url_to_hash = urllib.parse.urlparse(js_provided_url).path
-            LOG.warning(f"[SEB Check] Using JS Provided URL: {url_to_hash}")
-        else:
-            # Режим Native: Хешируем текущий URL API запроса
-            url_to_hash = request.build_absolute_uri()
-            LOG.warning(f"[SEB Check] Using Native API URL: {url_to_hash}")
-
-        # 3. Проверка
-        for key in seb_keys:
-            # Формируем строку для хеширования: URL + Key
-            # Важно: кодировка utf-8
-            tohash = url_to_hash.encode("utf-8") + key.encode("utf-8")
-            calculated_hash = hashlib.sha256(tohash).hexdigest()
-
-            # Логируем для отладки (потом можно убрать)
-            LOG.warning(
-                f"[SEB Debug] Key: ...{key[-6:]} | Calculated: {calculated_hash} | Received: {header_hash_value}"
-            )
-
-            if calculated_hash == header_hash_value:
-                LOG.warning("[SEB Check] SUCCESS")
+        try:
+            # 0. Сначала проверим, не подтвержден ли уже пользователь в этой сессии
+            # Это позволяет IFRAME работать, так как они не могут передать заголовки,
+            # но передают сессионную куку.
+            if request.session.get("seb_validated_for_course") == str(course_key):
+                # Дополнительно можно проверить User-Agent, чтобы убедиться, что это всё ещё SEB
+                # но для modern WebView это не всегда надежно.
                 return True
 
-        # Ни один ключ не подошел
-        LOG.warning("[SEB Check] FAILED: Hash mismatch")
-        return False
+            seb_keys = self.get_seb_keys(course_key)
+            if not seb_keys:
+                return True
+
+            # 1. Получаем хеш от клиента
+            header_hash_value = request.META.get(self.http_header)
+
+            # Если заголовка нет - сразу отказ (сессию мы проверили выше)
+            if not header_hash_value:
+                return False
+
+            header_hash_value = header_hash_value.strip().lower()
+
+            # 2. Определяем URL (JS API или Classic)
+            js_provided_url = request.META.get("HTTP_X_SAFEEXAMBROWSER_REQUESTURL")
+            url_to_hash = ""
+
+            if js_provided_url:
+                # Режим JS API (SPA)
+                url_to_hash = js_provided_url
+                # Security: Проверка хоста (укажите ваши домены!)
+                allowed_hosts = [
+                    "apps.local.openedx.io:2000",
+                    "local.openedx.io:8000",
+                    request.get_host(),
+                ]
+                try:
+                    parsed = urllib.parse.urlparse(url_to_hash)
+                    if parsed.netloc and parsed.netloc not in allowed_hosts:
+                        return False
+                except:
+                    return False
+            else:
+                # Режим Classic (прямой запрос)
+                url_to_hash = request.build_absolute_uri()
+
+            # 3. Проверка хеша
+            is_valid = False
+            for key in seb_keys:
+                clean_key = str(key).strip()
+                # Стандарт SEB: SHA256(URL + Key)
+                to_hash = url_to_hash.encode("utf-8") + clean_key.encode("utf-8")
+                expected = hashlib.sha256(to_hash).hexdigest().lower()
+
+                if expected == header_hash_value:
+                    is_valid = True
+                    break
+
+                # Попытка для React (иногда пропадает слеш)
+                if js_provided_url:
+                    alt_url = (
+                        url_to_hash[:-1]
+                        if url_to_hash.endswith("/")
+                        else url_to_hash + "/"
+                    )
+                    to_hash_alt = alt_url.encode("utf-8") + clean_key.encode("utf-8")
+                    if (
+                        hashlib.sha256(to_hash_alt).hexdigest().lower()
+                        == header_hash_value
+                    ):
+                        is_valid = True
+                        break
+
+            # 4. Если проверка прошла успешно - ЗАПОМИНАЕМ ЭТО В СЕССИИ
+            if is_valid:
+                # Ставим метку, что для этого курса в этой сессии SEB проверен
+                request.session["seb_validated_for_course"] = str(course_key)
+                # Важно: помечаем сессию как измененную, чтобы Django сохранил её
+                request.session.modified = True
+                return True
+
+            LOG.warning(
+                f"[SEB] Hash mismatch. Client: {header_hash_value} vs URL: {url_to_hash}"
+            )
+            return False
+
+        except Exception as e:
+            LOG.error(f"[SEB Check] Error: {str(e)}", exc_info=True)
+            return False
 
 
 class CheckSEBHashBrowserExamKey(CheckSEBHash, Permission):
@@ -132,7 +171,7 @@ class CheckSEBHashConfigKey(CheckSEBHash, Permission):
 
 class CheckSEBHashBrowserExamKeyOrConfigKey(Permission):
     """
-    Check for either Browser examk keys or Config keys.
+    Check for either Browser exam keys or Config keys.
     Allow if either is valid
     """
 
@@ -142,6 +181,10 @@ class CheckSEBHashBrowserExamKeyOrConfigKey(Permission):
             request, course_key, masquerade
         )
         config_key = CheckSEBHashConfigKey().check(request, course_key, masquerade)
+
+        LOG.warning(
+            f"[SEB Check] Combined result: Browser={browser_exam_key}, Config={config_key}, Final={config_key or browser_exam_key}"
+        )
 
         return config_key or browser_exam_key
 
