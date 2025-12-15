@@ -98,6 +98,8 @@ class CheckSEBHash:
                 allowed_hosts = [
                     "apps.local.openedx.io:2000",
                     "local.openedx.io:8000",
+                    "asdebug.ru",
+                    "courses.openedu.urfu.ru",
                     request.get_host(),
                 ]
                 try:
