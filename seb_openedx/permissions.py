@@ -65,14 +65,36 @@ class CheckSEBHash:
     def check(self, request, course_key, *args, **kwargs):
         """
         Проверка SEB с поддержкой JS API и Iframes через сессию.
-        + FIX: кэш “валидированности” хранится как словарь по курсам в сессии (seb_validated_courses)
-        + FIX: опциональный TTL для этой “валидности” (SEB_SESSION_VALIDATION_TTL_SECONDS)
+
+        FIX1: кэш “валидированности” хранится как словарь по курсам:
+              request.session["seb_validated_courses"][<course_id>] = {"ts": ...}
+
+        FIX2: опциональный TTL:
+              settings.SEB_SESSION_VALIDATION_TTL_SECONDS = <int>  (например 3600)
+
+        FIX3 (важно для MFE/SPА без F5):
+              если нет HTTP_X_SAFEEXAMBROWSER_REQUESTURL, пробуем HTTP_REFERER как URL для хеша
         """
         try:
             course_key_str = str(course_key)
 
+            # OPTIONS (CORS preflight) лучше не блокировать SEB’ом
+            # (контент не выдаёт, но может ломать SPA на первом заходе)
+            if getattr(request, "method", "").upper() == "OPTIONS":
+                return True
+
             # --- 0) Сессионный кэш (по курсам) + TTL ---
-            ttl_seconds = getattr(settings, "SEB_SESSION_VALIDATION_TTL_SECONDS", None)
+            course_cfg = get_config_by_course(course_key) or {}
+            ttl_seconds = course_cfg.get("SEB_SESSION_VALIDATION_TTL_SECONDS", None)
+            if ttl_seconds is None:
+                ttl_seconds = getattr(
+                    settings, "SEB_SESSION_VALIDATION_TTL_SECONDS", None
+                )
+
+            try:
+                ttl_seconds = int(ttl_seconds) if ttl_seconds is not None else None
+            except Exception:
+                ttl_seconds = None
 
             # Миграция со старого ключа (одно значение) — чтобы не ломать текущие сессии
             old_single = request.session.get("seb_validated_for_course")
@@ -82,7 +104,6 @@ class CheckSEBHash:
                     validated = {}
                 validated[course_key_str] = {"ts": int(time.time())}
                 request.session["seb_validated_courses"] = validated
-                # можно оставить старый ключ, но лучше убрать, чтобы не путало
                 try:
                     del request.session["seb_validated_for_course"]
                 except KeyError:
@@ -93,8 +114,6 @@ class CheckSEBHash:
             validated = request.session.get("seb_validated_courses", {})
             if isinstance(validated, dict) and course_key_str in validated:
                 entry = validated.get(course_key_str)
-
-                # entry может быть True/1 если кто-то вручную записал — поддержим
                 ts = None
                 if isinstance(entry, dict):
                     ts = entry.get("ts")
@@ -109,7 +128,6 @@ class CheckSEBHash:
                     ):
                         return True
                 except Exception:
-                    # если ts битый — считаем протухшим
                     pass
 
                 # протухло — чистим запись и продолжаем обычную проверку
@@ -132,57 +150,86 @@ class CheckSEBHash:
 
             # 2. Определяем URL (JS API или Classic)
             js_provided_url = request.META.get("HTTP_X_SAFEEXAMBROWSER_REQUESTURL")
-            url_to_hash = ""
+
+            # Собираем список кандидатов URL, по которым попробуем посчитать хеш.
+            # Для SPA это важно: иногда SEB считает хеш по URL страницы (Referer),
+            # даже если реальный запрос идёт в /api/...
+            url_candidates = []
 
             if js_provided_url:
-                # Режим JS API (SPA)
-                url_to_hash = js_provided_url
-                # Security: Проверка хоста (укажите ваши домены!)
-                allowed_hosts = [
-                    "apps.local.openedx.io:2000",
-                    "local.openedx.io:8000",
-                    "asdebug.ru",
-                    "courses.openedu.urfu.ru",
-                    request.get_host(),
-                ]
-                try:
-                    parsed = urllib.parse.urlparse(url_to_hash)
-                    if parsed.netloc and parsed.netloc not in allowed_hosts:
-                        return False
-                except:
-                    return False
+                url_candidates.append(js_provided_url)
             else:
-                # Режим Classic (прямой запрос)
-                url_to_hash = request.build_absolute_uri()
+                # Classic (прямой запрос)
+                url_candidates.append(request.build_absolute_uri())
+
+                # FIX для MFE: fallback на Referer (часто там SPA route)
+                referer = request.META.get("HTTP_REFERER")
+                if referer:
+                    # минимальная защита: если referer вообще есть
+                    url_candidates.append(referer)
+
+            # Нормализуем кандидаты: убираем пробелы
+            url_candidates = [u.strip() for u in url_candidates if u and u.strip()]
+
+            # Security: Проверка хоста для JS API URL и для referer fallback
+            allowed_hosts = [
+                "apps.local.openedx.io:2000",
+                "local.openedx.io:8000",
+                "asdebug.ru",
+                "courses.openedu.urfu.ru",
+                request.get_host(),
+            ]
+
+            filtered_candidates = []
+            for u in url_candidates:
+                try:
+                    parsed = urllib.parse.urlparse(u)
+                    # если netloc задан — проверим
+                    if parsed.netloc and parsed.netloc not in allowed_hosts:
+                        continue
+                    filtered_candidates.append(u)
+                except Exception:
+                    continue
+
+            url_candidates = filtered_candidates
+
+            if not url_candidates:
+                return False
 
             # 3. Проверка хеша
             is_valid = False
-            for key in seb_keys:
-                clean_key = str(key).strip()
-                # Стандарт SEB: SHA256(URL + Key)
-                to_hash = url_to_hash.encode("utf-8") + clean_key.encode("utf-8")
-                expected = hashlib.sha256(to_hash).hexdigest().lower()
+            matched_url = None
 
-                if expected == header_hash_value:
-                    is_valid = True
-                    break
+            for url_to_hash in url_candidates:
+                for key in seb_keys:
+                    clean_key = str(key).strip()
 
-                # Попытка для React (иногда пропадает слеш)
-                if js_provided_url:
+                    # Стандарт SEB: SHA256(URL + Key)
+                    to_hash = url_to_hash.encode("utf-8") + clean_key.encode("utf-8")
+                    expected = hashlib.sha256(to_hash).hexdigest().lower()
+
+                    if expected == header_hash_value:
+                        is_valid = True
+                        matched_url = url_to_hash
+                        break
+
+                    # Попытка (иногда пропадает/добавляется слеш) — полезно и для SPA, и для classic
                     alt_url = (
                         url_to_hash[:-1]
                         if url_to_hash.endswith("/")
-                        else url_to_hash + "/"
+                        else (url_to_hash + "/")
                     )
                     to_hash_alt = alt_url.encode("utf-8") + clean_key.encode("utf-8")
-                    if (
-                        hashlib.sha256(to_hash_alt).hexdigest().lower()
-                        == header_hash_value
-                    ):
+                    expected_alt = hashlib.sha256(to_hash_alt).hexdigest().lower()
+                    if expected_alt == header_hash_value:
                         is_valid = True
+                        matched_url = alt_url
                         break
 
-            # 4. Если проверка прошла успешно - ЗАПОМИНАЕМ ЭТО В СЕССИИ (по курсам, не одно значение)
+                if is_valid:
+                    break
+
+            # 4. Если проверка прошла успешно - ЗАПОМИНАЕМ ЭТО В СЕССИИ (по курсам)
             if is_valid:
                 validated = request.session.get("seb_validated_courses", {})
                 if not isinstance(validated, dict):
@@ -190,10 +237,23 @@ class CheckSEBHash:
                 validated[course_key_str] = {"ts": int(time.time())}
                 request.session["seb_validated_courses"] = validated
                 request.session.modified = True
+
+                LOG.info(
+                    "[SEB] Validated and cached in session. course=%s via=%s matched_url=%s path=%s",
+                    course_key_str,
+                    self.http_header,
+                    matched_url,
+                    request.path,
+                )
                 return True
 
             LOG.warning(
-                f"[SEB] Hash mismatch. Client: {header_hash_value} vs URL: {url_to_hash}"
+                "[SEB] Hash mismatch. course=%s via=%s path=%s client=%s candidates=%s",
+                course_key_str,
+                self.http_header,
+                request.path,
+                header_hash_value,
+                url_candidates,
             )
             return False
 
