@@ -5,6 +5,7 @@ from __future__ import absolute_import
 import abc
 import hashlib
 import logging
+import time
 import urllib.parse
 
 from django.conf import settings
@@ -64,15 +65,57 @@ class CheckSEBHash:
     def check(self, request, course_key, *args, **kwargs):
         """
         Проверка SEB с поддержкой JS API и Iframes через сессию.
+        + FIX: кэш “валидированности” хранится как словарь по курсам в сессии (seb_validated_courses)
+        + FIX: опциональный TTL для этой “валидности” (SEB_SESSION_VALIDATION_TTL_SECONDS)
         """
         try:
-            # 0. Сначала проверим, не подтвержден ли уже пользователь в этой сессии
-            # Это позволяет IFRAME работать, так как они не могут передать заголовки,
-            # но передают сессионную куку.
-            if request.session.get("seb_validated_for_course") == str(course_key):
-                # Дополнительно можно проверить User-Agent, чтобы убедиться, что это всё ещё SEB
-                # но для modern WebView это не всегда надежно.
+            course_key_str = str(course_key)
+
+            # --- 0) Сессионный кэш (по курсам) + TTL ---
+            ttl_seconds = getattr(settings, "SEB_SESSION_VALIDATION_TTL_SECONDS", None)
+
+            # Миграция со старого ключа (одно значение) — чтобы не ломать текущие сессии
+            old_single = request.session.get("seb_validated_for_course")
+            if old_single == course_key_str:
+                validated = request.session.get("seb_validated_courses", {})
+                if not isinstance(validated, dict):
+                    validated = {}
+                validated[course_key_str] = {"ts": int(time.time())}
+                request.session["seb_validated_courses"] = validated
+                # можно оставить старый ключ, но лучше убрать, чтобы не путало
+                try:
+                    del request.session["seb_validated_for_course"]
+                except KeyError:
+                    pass
+                request.session.modified = True
                 return True
+
+            validated = request.session.get("seb_validated_courses", {})
+            if isinstance(validated, dict) and course_key_str in validated:
+                entry = validated.get(course_key_str)
+
+                # entry может быть True/1 если кто-то вручную записал — поддержим
+                ts = None
+                if isinstance(entry, dict):
+                    ts = entry.get("ts")
+
+                if ttl_seconds is None:
+                    return True
+
+                # TTL включён — проверяем протухание
+                try:
+                    if ts is not None and (time.time() - float(ts)) <= float(
+                        ttl_seconds
+                    ):
+                        return True
+                except Exception:
+                    # если ts битый — считаем протухшим
+                    pass
+
+                # протухло — чистим запись и продолжаем обычную проверку
+                validated.pop(course_key_str, None)
+                request.session["seb_validated_courses"] = validated
+                request.session.modified = True
 
             seb_keys = self.get_seb_keys(course_key)
             if not seb_keys:
@@ -139,11 +182,13 @@ class CheckSEBHash:
                         is_valid = True
                         break
 
-            # 4. Если проверка прошла успешно - ЗАПОМИНАЕМ ЭТО В СЕССИИ
+            # 4. Если проверка прошла успешно - ЗАПОМИНАЕМ ЭТО В СЕССИИ (по курсам, не одно значение)
             if is_valid:
-                # Ставим метку, что для этого курса в этой сессии SEB проверен
-                request.session["seb_validated_for_course"] = str(course_key)
-                # Важно: помечаем сессию как измененную, чтобы Django сохранил её
+                validated = request.session.get("seb_validated_courses", {})
+                if not isinstance(validated, dict):
+                    validated = {}
+                validated[course_key_str] = {"ts": int(time.time())}
+                request.session["seb_validated_courses"] = validated
                 request.session.modified = True
                 return True
 
