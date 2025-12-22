@@ -176,7 +176,9 @@ class CheckSEBHash:
                 "apps.local.openedx.io:2000",
                 "local.openedx.io:8000",
                 "asdebug.ru",
+                "apps.asdebug.ru",
                 "courses.openedu.urfu.ru",
+                "apps.courses.openedu.urfu.ru",
                 request.get_host(),
             ]
 
