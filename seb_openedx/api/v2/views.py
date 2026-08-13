@@ -54,18 +54,8 @@ def sequence_status(request):
     block_id_match = re.search(r"block@([^/?]+)", usage_key_string)
     block_id = block_id_match.group(1) if block_id_match else None
 
-    LOG.info(
-        "[SEB sequence_status] user=%s course=%s usage=%s block_id=%s blacklist=%s",
-        request.user.username,
-        course_key,
-        usage_key_string,
-        block_id,
-        blacklist_sequences,
-    )
-
     # Если этот sequential не в чёрном списке — SEB не нужен
     if not block_id or block_id not in blacklist_sequences:
-        LOG.info("[SEB sequence_status] block_id not in blacklist -> blocked=False")
         return JsonResponse({"blocked": False})
 
     access_denied = True  # по умолчанию запрещаем
@@ -75,11 +65,6 @@ def sequence_status(request):
         perm = perm_cls()
         # try:
         ok = perm.check(request, course_key, masquerade)
-        LOG.info(
-            "[SEB sequence_status] permission %s.check -> %s",
-            perm_cls.__name__,
-            ok,
-        )
         # Семантика как в middleware: если ХОТЬ ОДНО разрешение прошло — доступ открыт
         if ok:
             access_denied = False
@@ -91,20 +76,8 @@ def sequence_status(request):
         #         e,
         #     )
 
-    LOG.info(
-        "[SEB sequence_status] DECISION: access_denied=%s => blocked=%s",
-        access_denied,
-        bool(access_denied),
-    )
-
     # Если хоть одно разрешение пропустило (для обычного браузера этого не будет) — не блокируем
     if not access_denied:
-        LOG.info(
-            "[SEB sequence_status] access allowed for user=%s course=%s usage=%s",
-            request.user.username,
-            course_key,
-            usage_key_string,
-        )
         return JsonResponse({"blocked": False})
 
     # Иначе блокируем и строим seb:// ссылку
@@ -123,13 +96,5 @@ def sequence_status(request):
     except Exception as e:
         LOG.error("[SEB sequence_status] failed to build seb_link: %s", e)
         seb_link = None
-
-    LOG.info(
-        "[SEB sequence_status] BLOCKED user=%s course=%s usage=%s seb_link=%s",
-        request.user.username,
-        course_key,
-        usage_key_string,
-        seb_link,
-    )
 
     return JsonResponse({"blocked": True, "seb_link": seb_link})

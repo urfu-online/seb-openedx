@@ -50,9 +50,9 @@ class SecureExamBrowserMiddleware:
 
         if settings.SERVICE_VARIANT == "cms":
             return None
-        # LOG.warning(f"🚀 Processing: {request.path}")
-        # LOG.warning(f"📦 view_kwargs: {view_kwargs}")
-        # LOG.warning(f"🎬 view_func: {view_func.__name__}")
+        # Public catalog API must not require Safe Exam Browser.
+        if (request.path or "").startswith("/urfu/api/"):
+            return None
         course_key_string = view_kwargs.get("course_key_string") or view_kwargs.get(
             "course_id"
         )
@@ -73,7 +73,6 @@ class SecureExamBrowserMiddleware:
                 try:
                     usage_key = UsageKey.from_string(usage_key_string)
                     course_key = usage_key.course_key if usage_key else None
-                    LOG.warning(f"📍 Extracted course_key from usage_key: {course_key}")
                 except Exception as e:
                     LOG.error(f"Error parsing usage_key {usage_key_string}: {e}")
                     course_key = None
@@ -126,13 +125,6 @@ class SecureExamBrowserMiddleware:
                 for permission in get_enabled_permission_classes(course_key):
                     if permission().check(request, course_key, masquerade):
                         access_denied = False
-                    else:
-                        LOG.info(
-                            "Permission: %s denied for: %s. | %s",
-                            permission,
-                            user_name,
-                            request.path,
-                        )
 
             if access_denied:
                 return self.handle_access_denied(
@@ -278,22 +270,21 @@ class SecureExamBrowserMiddleware:
 
         # Always allow SEB own API
         if views_module.startswith("seb_openedx.api"):
-            LOG.warning(f"✅ Whitelisted: SEB API")
             return True
 
         if request.path.startswith("/api/seb/"):
-            LOG.warning(f"✅ Whitelisted: SEB  API")
             return True
 
         # Always allow ProctorX paths (for booking widget)
         if request.path.startswith("/proctorx/"):
-            LOG.warning(f"✅ Whitelisted: ProctorX API {request.path}")
+            return True
+
+        if request.path.startswith("/urfu/api/"):
             return True
 
         # НОВОЕ: Check direct path matching
         for wpath in whitelist_paths:
             if wpath.startswith("/") and request.path.startswith(wpath):
-                LOG.warning(f"✅ Whitelisted by path: {wpath}")
                 return True
 
         # MFEs require more granular blocks than module level
@@ -355,7 +346,6 @@ class SecureExamBrowserMiddleware:
                     if block_match and block_match.group(1) in blacklist:
                         continue  # Не добавляем в whitelist
 
-                LOG.warning(f"✅ Whitelisted MFE navigation: {request.path}")
                 return True
 
         if not whitelist_paths:
@@ -374,7 +364,6 @@ class SecureExamBrowserMiddleware:
                     re.match(r"^/api/courseware/course/", request.path),
                 ]
             ):
-                LOG.warning(f"✅ Whitelisted via 'courseware': {request.path}")
                 return True
 
         # Whitelisting by url name
@@ -423,9 +412,6 @@ class SecureExamBrowserMiddleware:
         if not blacklist_sequences:
             return False
 
-        LOG.warning(f"🔍 [{request.user.username}] Checking: {request.path}")
-        LOG.warning(f"📋 Blacklist: {blacklist_sequences}")
-
         # 1. Sequence API
         # m = re.match(r"^/api/courseware/sequence/(?P<usage_key>[^/?]+)", request.path)
         # if m:
@@ -460,7 +446,6 @@ class SecureExamBrowserMiddleware:
                         if block_id_match:
                             block_id = block_id_match.group(1)
                             if block_id in blacklist_sequences:
-                                LOG.warning(f"❌ BLOCKED ProctorX: {block_id}")
                                 return True
                 except Exception as e:
                     LOG.error(f"ProctorX check error: {e}")
@@ -478,9 +463,6 @@ class SecureExamBrowserMiddleware:
                         block_id_match
                         and block_id_match.group(1) in blacklist_sequences
                     ):
-                        LOG.warning(
-                            f"❌ BLOCKED XBlock sequence: {block_id_match.group(1)}"
-                        )
                         return True
 
                 # Parent sequence check
@@ -489,7 +471,6 @@ class SecureExamBrowserMiddleware:
                         usage_key_string, course_key, level="sequence"
                     )
                     if parent_sequence and parent_sequence in blacklist_sequences:
-                        LOG.warning(f"❌ BLOCKED XBlock parent: {parent_sequence}")
                         return True
                 except Exception as e:
                     LOG.error(f"Parent check error: {e}")
@@ -514,7 +495,6 @@ class SecureExamBrowserMiddleware:
                         block_id_match
                         and block_id_match.group(1) in blacklist_sequences
                     ):
-                        LOG.warning(f"❌ BLOCKED XBlock API: {block_id_match.group(1)}")
                         return True
 
                 try:
@@ -522,12 +502,10 @@ class SecureExamBrowserMiddleware:
                         usage_key_string, course_key, level="sequence"
                     )
                     if parent_sequence and parent_sequence in blacklist_sequences:
-                        LOG.warning(f"❌ BLOCKED XBlock API parent: {parent_sequence}")
                         return True
                 except Exception as e:
                     LOG.error(f"XBlock API parent error: {e}")
 
-        LOG.warning(f"✅ ALLOWED: {request.path}")
         return False
 
     def is_blacklisted_vertical(self, config, request, course_key):

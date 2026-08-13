@@ -38,7 +38,6 @@ class AlwaysAllowStaff(Permission):
             and request.user.is_authenticated
             and request.user.is_staff
         ):
-            LOG.info("SEB AlwaysAllowStaff check passed for user: %s", request.user)
             return True
         return False
 
@@ -200,7 +199,6 @@ class CheckSEBHash:
 
             # 3. Проверка хеша
             is_valid = False
-            matched_url = None
 
             for url_to_hash in url_candidates:
                 for key in seb_keys:
@@ -212,7 +210,6 @@ class CheckSEBHash:
 
                     if expected == header_hash_value:
                         is_valid = True
-                        matched_url = url_to_hash
                         break
 
                     # Попытка (иногда пропадает/добавляется слеш) — полезно и для SPA, и для classic
@@ -225,7 +222,6 @@ class CheckSEBHash:
                     expected_alt = hashlib.sha256(to_hash_alt).hexdigest().lower()
                     if expected_alt == header_hash_value:
                         is_valid = True
-                        matched_url = alt_url
                         break
 
                 if is_valid:
@@ -239,24 +235,8 @@ class CheckSEBHash:
                 validated[course_key_str] = {"ts": int(time.time())}
                 request.session["seb_validated_courses"] = validated
                 request.session.modified = True
-
-                LOG.info(
-                    "[SEB] Validated and cached in session. course=%s via=%s matched_url=%s path=%s",
-                    course_key_str,
-                    self.http_header,
-                    matched_url,
-                    request.path,
-                )
                 return True
 
-            LOG.warning(
-                "[SEB] Hash mismatch. course=%s via=%s path=%s client=%s candidates=%s",
-                course_key_str,
-                self.http_header,
-                request.path,
-                header_hash_value,
-                url_candidates,
-            )
             return False
 
         except Exception as e:
@@ -290,11 +270,6 @@ class CheckSEBHashBrowserExamKeyOrConfigKey(Permission):
             request, course_key, masquerade
         )
         config_key = CheckSEBHashConfigKey().check(request, course_key, masquerade)
-
-        LOG.warning(
-            f"[SEB Check] Combined result: Browser={browser_exam_key}, Config={config_key}, Final={config_key or browser_exam_key}"
-        )
-
         return config_key or browser_exam_key
 
 
